@@ -93,6 +93,21 @@ gateway (not raw serial). Channels are 1-indexed in every command/topic; interna
 | Hardware flash-on | `0x05` | `(channel - 1) + 0x0200` | Value = duration in deciseconds |
 | Hardware flash-off | `0x05` | `(channel - 1) + 0x0400` | Value = duration in deciseconds |
 
+Measured on the board, because the two flash registers are **not** mirror images of each other
+and the difference matters:
+
+- `flash_on` closes the coil for the duration, then opens it. What you would expect.
+- `flash_off` opens the coil for the duration, then **closes it**. It is an inverse pulse, not a
+  delayed off - the right tool for "this device runs continuously, interrupt it for five
+  seconds", and a trap if you reach for it to switch something off.
+- A plain `on`/`off` write while a pulse is running does nothing at all: the channel is hands-off
+  until the countdown ends. The only way to release a `flash_on` channel early is to stop
+  renewing it and let the pulse run out.
+
+Because a `flash_off` leaves the channel closed with no lease behind it, the reconciler decides
+whether to write from the **polled** coil state rather than from its own record of the last write
+- see [Reliability](#reliability).
+
 ## Install
 
 Deployed on the Pi under the shared `cave` checkout, using the shared `cave` venv (already has
@@ -237,6 +252,17 @@ dropped) - they answer different questions, so they're deliberately not the same
 - **One persistent TCP connection**, not one per command - the connection auto-reconnects on a
   fixed retry interval, and every reconnect triggers a one-time full resync (`write_multiple`)
   instead of trusting stale in-memory state.
+- **The polled coil state decides whether to write, not our memory of the last write.** Every
+  tick already reads all channels; if a coil disagrees with the resolved lease state, it gets
+  rewritten - so any divergence the gateway did not cause repairs itself within one tick, and a
+  channel that refuses to be written keeps saying so in the module bitmask instead of being
+  reported as whatever we wished for. A correction to a channel we believed was already applied
+  is logged as a warning (rate-limited to one per 30 s per channel, so a jammed relay does not
+  bury the journal). The failure that motivated this: a `flash_off` pulse expires, the coil
+  closes itself, no lease remains - and a gateway that trusted its own bookkeeping would decide
+  "off is already applied" and leave the relay closed indefinitely, with both status topics
+  reporting `off`. The only honest witness was the on-time counter, which has always been fed the
+  polled state.
 - Every layer that can fail silently has a counter for it: TCP connects/disconnects, MQTT
   broker connects/disconnects, and service restarts - all retained on MQTT so a dashboard that
   subscribes late still sees the last known values immediately.

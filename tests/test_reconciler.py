@@ -24,6 +24,7 @@ class FakeTCPClient:
         self.cnt_disconnects = 0
         self.sent = []
         self.flash_fires = []  # (address, seconds) for every 0x05 write to a flash trigger register
+        self.fail_single_writes = False  # simulate a channel that refuses to be written
 
     def get_stats(self):
         return {"tcp_connects": self.cnt_connections, "tcp_disconnects": self.cnt_disconnects}
@@ -42,6 +43,8 @@ class FakeTCPClient:
             address = int.from_bytes(frame[2:4], "big")
             value = int.from_bytes(frame[4:6], "big")
             if address < 0x0200:
+                if self.fail_single_writes:
+                    raise OSError("simulated write failure")
                 self.coils[address] = value == 0xFF00
             else:
                 self.flash_fires.append((address, value / 10.0))
@@ -208,6 +211,54 @@ async def run():
           second_payload["expires_at"] > first_payload["expires_at"])
     check("renewal does NOT reset 'since' (still the original transition time)",
           second_payload["since"] == first_payload["since"])
+
+    # --- regression: a coil that closed behind our back must be corrected from the
+    # *polled* state. This is not hypothetical: flash_off is an inverse pulse (measured on
+    # the board - it opens the coil for its duration and then closes it), so once such a
+    # pulse expires the channel sits closed with no lease behind it. Gating the write on
+    # our own memory of the last write meant "off is already applied", so the relay stayed
+    # closed forever while both status topics claimed "off".
+    gateway4 = FakeGateway()
+    table4 = ChannelTable()
+    client4 = FakeTCPClient(channel_count=4)
+    relay4 = Relay30CH(client4, slave_id=1, channel_count=4)
+    counters4 = FakeCounters()
+    r4 = ModuleReconciler("relay1", module_cfg, relay4, table4, counters4, gateway4, tick_seconds=1.0)
+
+    await r4._tick()  # startup resync: everything off, and we remember writing off
+    check("baseline: nothing claimed, all coils off", client4.coils == [False, False, False, False])
+
+    client4.coils[0] = True  # cewka zwarła się sama, bez żadnego leasingu
+    client4.sent.clear()
+    gateway4.published.clear()
+    counters4.ticks.clear()
+    await r4._tick()
+    check("coil closed behind our back gets written off again", client4.coils[0] is False)
+    corrections = [f for f in client4.sent
+                   if f[1] == 0x05 and int.from_bytes(f[2:4], "big") < 0x0200]
+    check("correction is a single-coil write, not a bulk resync", len(corrections) == 1)
+    ch1_on_ticks = [t for t in counters4.ticks if t[0] == "relay1:ch1" and t[1] is True]
+    check("on-time counter charged the channel for the divergence (it polls the coil)",
+          len(ch1_on_ticks) == 1)
+
+    client4.sent.clear()
+    await r4._tick()
+    check("once corrected, no further writes are issued",
+          [f for f in client4.sent if f[1] == 0x05] == [])
+
+    # A channel that refuses to be written must keep showing the polled truth, not our wish.
+    client4.coils[0] = True
+    client4.fail_single_writes = True
+    gateway4.published.clear()
+    await r4._tick()
+    bm = bitmask_status(gateway4.published)
+    check("bitmask reports the coil as on while the correction keeps failing",
+          bm and bm[-1][1]["state_bin"].endswith("1"))
+
+    client4.fail_single_writes = False
+    await r4._tick()
+    check("correction succeeds on the next tick and the coil finally opens",
+          client4.coils[0] is False)
 
     print("done")
 

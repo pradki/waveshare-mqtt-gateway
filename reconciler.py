@@ -42,6 +42,7 @@ class ModuleReconciler:
     """
 
     COUNTERS_PUBLISH_SECONDS = 15.0
+    DIVERGENCE_WARN_SECONDS = 30.0
 
     def __init__(self, module_id: str, module_cfg: dict, relay: Relay30CH,
                  channel_table: ChannelTable, counters: RelayCounters, gateway: MQTTGateway,
@@ -66,7 +67,11 @@ class ModuleReconciler:
                 continue
             self.counted_channels.add(ch)
 
+        # _last_applied to już tylko pamięć "co sami ostatnio zapisaliśmy", służąca do
+        # rozpoznania, że korygowany rozjazd nie jest naszą sprawką (i warto o nim
+        # krzyknąć). O tym, czy zapisywać, decyduje odczyt z modułu - patrz _apply_level.
         self._last_applied: dict[int, bool] = {}
+        self._divergence_warned: dict[int, float] = {}  # ch -> monotonic ostatniego ostrzeżenia
         self._last_status: dict[int, tuple] = {}  # ch -> (state, by, priority, expires_at) - decyduje o re-publish
         self._last_transition: dict[int, tuple] = {}  # ch -> (state, by, priority) - decyduje o resecie "since"
         self._state_since: dict[int, float] = {}  # ch -> epoch time.time() ostatniej realnej zmiany
@@ -164,16 +169,18 @@ class ModuleReconciler:
                 since = self._state_since.get(ch, time.time())
                 status_updates.append((ch, state_str, by, prio, expires_at, since))
 
-        await self._apply_level(desired_level, actual)
+        applied = await self._apply_level(desired_level, actual)
 
         for ch, state_str, by, prio, expires_at, since in status_updates:
             self._publish_status(ch, state_str, by, prio, expires_at, since)
 
         # `actual` was read at the *start* of this tick, before the writes above - overlay
-        # the level changes we just applied so the bitmask reflects the current state, not
-        # last tick's. Hands-off (flash) channels keep the polled ground truth untouched.
+        # the changes we actually managed to write, so the bitmask reflects the current
+        # state and not last tick's. Only successful writes are overlaid: a channel whose
+        # write failed, or that diverged behind our back, must keep showing the polled
+        # truth instead of what we wished for. Hands-off (flash) channels aren't touched.
         effective = list(actual)
-        for ch, state in desired_level.items():
+        for ch, state in applied.items():
             effective[ch - 1] = state
         self._publish_bitmask(effective, flash_bits)
 
@@ -185,7 +192,31 @@ class ModuleReconciler:
 
         self._publish_diag()
 
-    async def _apply_level(self, desired_level: dict[int, bool], actual: list[bool]):
+    def _warn_divergence(self, ch: int, actual_state: bool, desired: bool):
+        """Głośno o rozjeździe, ale nie co tick - zaklinowany przekaźnik pisałby do
+        journala raz na sekundę i zalałby wszystko inne."""
+        now = time.monotonic()
+        last = self._divergence_warned.get(ch)
+        if last is None or now - last >= self.DIVERGENCE_WARN_SECONDS:
+            self._divergence_warned[ch] = now
+            LOG.warning("%s/ch%d (%s): moduł zgłasza %s, a stan docelowy to %s - koryguję",
+                        self.module_id, ch, self.primary_name[ch],
+                        "on" if actual_state else "off", "on" if desired else "off")
+
+    async def _apply_level(self, desired_level: dict[int, bool], actual: list[bool]) -> dict[int, bool]:
+        """Dociąga kanały do stanu docelowego; zwraca to, co faktycznie zapisano.
+
+        Zapis pomijamy na podstawie stanu *odczytanego z modułu*, a nie własnej pamięci
+        tego, co ostatnio zapisaliśmy - tylko wtedy rozjazd, którego nie spowodowaliśmy,
+        sam się naprawia w następnym ticku.
+
+        A takie rozjazdy są realne. `flash_off` to impuls *odwrotny*: rozwiera cewkę na
+        `duration`, po czym ją **zwiera** (zmierzone na module). Po wygaśnięciu takiego
+        impulsu kanał zostaje więc załączony, i to bez żadnego leasingu za sobą. Gdy
+        warunek pomijania patrzył na własną pamięć, gateway uznawał, że "off jest już
+        zapisane", i nie ruszał kanału - przekaźnik zostawał zwarty w nieskończoność, a
+        oba topici statusu pokazywały "off". Jedynym śladem był licznik on-time, bo ten
+        od początku liczy z odczytu."""
         if self._need_resync:
             bits = list(actual)  # kanały bez wyliczonego stanu (hands-off) - zostaw jak są
             for ch, state in desired_level.items():
@@ -194,21 +225,33 @@ class ModuleReconciler:
                 await self.relay.write_multiple(bits)
                 self._need_resync = False
                 self._last_applied.update(desired_level)
+                return dict(desired_level)
             except Exception:
                 LOG.exception("write_multiple (resync) nieudane dla %s", self.module_id)
-            return
+            return {}
 
+        applied: dict[int, bool] = {}
         for ch, state in desired_level.items():
-            if self._last_applied.get(ch) == state:
+            if actual[ch - 1] == state:
+                self._last_applied[ch] = state
+                self._divergence_warned.pop(ch, None)
                 continue
+
+            if self._last_applied.get(ch) == state:
+                # Ten stan już raz zapisaliśmy, a moduł mówi inaczej - ktoś albo coś
+                # ruszyło kanał poza nami.
+                self._warn_divergence(ch, actual[ch - 1], state)
+
             try:
                 if state:
                     await self.relay.relay_on(ch)
                 else:
                     await self.relay.relay_off(ch)
                 self._last_applied[ch] = state
+                applied[ch] = state
             except Exception:
                 LOG.exception("relay_on/off nieudane dla %s/ch%d", self.module_id, ch)
+        return applied
 
     def _publish_status(self, ch: int, state_str: str, by, prio, expires_at, since):
         name = self.primary_name[ch]

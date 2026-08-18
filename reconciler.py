@@ -120,7 +120,7 @@ class ModuleReconciler:
         for ch in range(1, self.channel_count + 1):
             lease = self.table.resolve(ch, now)
 
-            if lease and lease.kind == "flash":
+            if lease and lease.in_flash(now):
                 identity = (lease.service, lease.applied_at)
                 if self._flash_active_identity.get(ch) != identity:
                     seen = self._flash_ever_fired.setdefault(ch, set())
@@ -128,7 +128,7 @@ class ModuleReconciler:
                         # Ten lease już raz odpalił sprzęt, ale został wtedy przejęty przez
                         # wyższy priorytet - wznawiamy tylko na czas, który mu jeszcze
                         # zostawał, a nie od nowa na pełny czas trwania.
-                        fire_duration = max(0.1, lease.expires_at - now)
+                        fire_duration = max(0.1, lease.flash_until - now)
                     else:
                         fire_duration = lease.duration
                         seen.add(identity)
@@ -140,7 +140,7 @@ class ModuleReconciler:
                     except Exception:
                         LOG.exception("relay_flash_on/off nieudane dla %s/ch%d", self.module_id, ch)
                     self._flash_active_identity[ch] = identity
-                self._flash_until[ch] = lease.expires_at
+                self._flash_until[ch] = lease.flash_until
                 flash_bits[ch - 1] = True
                 state_str = "flash_on" if lease.state else "flash_off"
                 by, prio = lease.service, lease.priority
@@ -151,7 +151,9 @@ class ModuleReconciler:
                 self._flash_until.pop(ch, None)
                 self._flash_active_identity.pop(ch, None)
                 self._flash_ever_fired.pop(ch, None)
-                state = lease.state if lease else False
+                # Po impulsie `flash_off` leasing wciąż żyje i trzyma "on" (bo tak właśnie
+                # zostawił cewkę moduł) - stąd level_state(), a nie state.
+                state = lease.level_state() if lease else False
                 desired_level[ch] = state
                 state_str = "on" if state else "off"
                 by, prio = (lease.service, lease.priority) if lease else (None, None)

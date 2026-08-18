@@ -5,6 +5,16 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+# config.py jest gitignorowany (trzyma prawdziwe adresy z LAN), więc testy jadą na
+# tracked szablonie - inaczej świeży klon nie umiałby ich uruchomić. Szablon definiuje
+# moduł "relay1", tego samego używają testy.
+import importlib.util
+_spec = importlib.util.spec_from_file_location(
+    "config", Path(__file__).resolve().parent.parent / "config.example.py")
+_config = importlib.util.module_from_spec(_spec)
+sys.modules["config"] = _config
+_spec.loader.exec_module(_config)
+
 from leases import ChannelTable, Lease
 from waveshare import Relay30CH
 from reconciler import ModuleReconciler
@@ -259,6 +269,53 @@ async def run():
     await r4._tick()
     check("correction succeeds on the next tick and the coil finally opens",
           client4.coils[0] is False)
+
+    # --- flash_off: moduł celowo zwiera cewkę po impulsie, więc ten stan ma właściciela
+    # i nie wolno go gasić. Wcześniej reconciler znał tylko "impuls się skończył -> brak
+    # roszczenia -> off" i po każdym flash_off robił sekundowy przebłysk włączenia.
+    gateway5 = FakeGateway()
+    table5 = ChannelTable()
+    client5 = FakeTCPClient(channel_count=4)
+    relay5 = Relay30CH(client5, slave_id=1, channel_count=4)
+    r5 = ModuleReconciler("relay1", module_cfg, relay5, table5, FakeCounters(), gateway5, tick_seconds=1.0)
+    await r5._tick()  # startup resync
+
+    def level_writes(client):
+        return [f for f in client.sent
+                if f[1] == 0x05 and int.from_bytes(f[2:4], "big") < 0x0200]
+
+    started = time.monotonic()
+    table5.apply(1, Lease(service="svc", state=False, priority=10, kind="flash", duration=0.15,
+                          flash_until=started + 0.15, expires_at=started + 0.65, hold_after=True))
+    client5.sent.clear()
+    gateway5.published.clear()
+    await r5._tick()
+    inverse_fires = [f for f in client5.sent
+                     if f[1] == 0x05 and int.from_bytes(f[2:4], "big") >= 0x0400]
+    check("flash_off fires the inverse hardware pulse", len(inverse_fires) == 1)
+    check("channel is hands-off while the pulse runs", level_writes(client5) == [])
+    check("status reports flash_off during the pulse",
+          last_status_payload(gateway5, "co_fan")["state"] == "flash_off")
+
+    await asyncio.sleep(0.2)
+    client5.coils[0] = True  # impuls minął, moduł sam zwarł cewkę
+    client5.sent.clear()
+    gateway5.published.clear()
+    await r5._tick()
+    check("coil closed by the hardware after flash_off is left closed", client5.coils[0] is True)
+    check("no corrective write, so no one-second blink", level_writes(client5) == [])
+    held = last_status_payload(gateway5, "co_fan")
+    check("status now reports the held on state, with its owner",
+          held["state"] == "on" and held["by"] == "svc")
+    bm = bitmask_status(gateway5.published)
+    check("bitmask agrees the coil is closed",
+          bm and bm[-1][1]["state_bin"].endswith("1"))
+
+    await asyncio.sleep(0.5)  # leasing wygasł
+    client5.sent.clear()
+    await r5._tick()
+    check("once the lease expires the channel does go off", client5.coils[0] is False)
+    check("and that took a single-coil write", len(level_writes(client5)) == 1)
 
     print("done")
 

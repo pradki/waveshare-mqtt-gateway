@@ -15,9 +15,34 @@ class Lease:
     duration: float | None = None  # tylko dla kind="flash"
     applied_at: float = field(default_factory=time.monotonic)
 
+    # Tylko dla kind="flash". Impuls sprzętowy trwa do `flash_until`, ale sam leasing może
+    # żyć dłużej: `flash_off` kończy się cewką *zwartą* i ten stan trzeba posiadać, a nie
+    # tylko przeczekać - stąd `hold_after`. Dla `flash_on` stanem po impulsie jest "off",
+    # czyli i tak stan domyślny, więc leasing kończy się razem z impulsem
+    # (`flash_until == expires_at`, `hold_after is None`).
+    flash_until: float | None = None
+    hold_after: bool | None = None
+
+    def __post_init__(self):
+        if self.kind == "flash" and self.flash_until is None:
+            self.flash_until = self.expires_at
+
     def is_expired(self, now: float | None = None) -> bool:
         now = time.monotonic() if now is None else now
         return self.expires_at <= now
+
+    def in_flash(self, now: float | None = None) -> bool:
+        """Czy sprzętowy impuls jeszcze trwa - wtedy kanał jest hands-off."""
+        if self.kind != "flash":
+            return False
+        now = time.monotonic() if now is None else now
+        return now < self.flash_until
+
+    def level_state(self) -> bool:
+        """Stan, jaki reconciler ma utrzymywać, gdy impuls się już skończył."""
+        if self.kind == "flash":
+            return bool(self.hold_after)
+        return self.state
 
 
 class ChannelTable:

@@ -93,20 +93,29 @@ gateway (not raw serial). Channels are 1-indexed in every command/topic; interna
 | Hardware flash-on | `0x05` | `(channel - 1) + 0x0200` | Value = duration in deciseconds |
 | Hardware flash-off | `0x05` | `(channel - 1) + 0x0400` | Value = duration in deciseconds |
 
-Measured on the board, because the two flash registers are **not** mirror images of each other
-and the difference matters:
+Measured on the board. The two flash registers are mirror images of each other, and each ends in
+the state *opposite* to the one it pulsed:
 
-- `flash_on` closes the coil for the duration, then opens it. What you would expect.
-- `flash_off` opens the coil for the duration, then **closes it**. It is an inverse pulse, not a
-  delayed off - the right tool for "this device runs continuously, interrupt it for five
-  seconds", and a trap if you reach for it to switch something off.
-- A plain `on`/`off` write while a pulse is running does nothing at all: the channel is hands-off
-  until the countdown ends. The only way to release a `flash_on` channel early is to stop
-  renewing it and let the pulse run out.
+- `flash_on` closes the coil for the duration, then opens it and leaves it open.
+- `flash_off` opens the coil for the duration, then closes it and leaves it closed.
 
-Because a `flash_off` leaves the channel closed with no lease behind it, the reconciler decides
-whether to write from the **polled** coil state rather than from its own record of the last write
-- see [Reliability](#reliability).
+So both mean "hold the other state for a definite time, then return" - `flash_on` is
+"run it for five seconds", `flash_off` is "this device runs continuously, interrupt it for five
+seconds". A plain `on`/`off` write while a pulse is running does nothing at all: the channel is
+hands-off until the countdown ends, so the only way to release a `flash_on` channel early is to
+stop renewing it and let the pulse run out.
+
+That asymmetry in *outcome* is why the two commands produce different leases. `flash_on` ends in
+the channel's default state (open), so there is nothing to own after the pulse and its lease ends
+with the pulse. `flash_off` ends in the opposite of the default, so that state needs an owner:
+its lease outlives the pulse and holds `on` for `ttl` afterwards, exactly like a plain `on`
+command, renewable in the same way. Without that, the reconciler would resolve the channel to
+"nobody is claiming this, so open it" one tick after the pulse - switching off precisely what the
+hardware had just been told to switch back on, and leaving a one-second blink behind it.
+
+The practical consequence: **a `flash_off` is also a standing `on` claim.** Send it to a channel
+where "keeps running afterwards" is what you mean, and don't reach for it as a fast way to switch
+something off - there isn't one.
 
 ## Install
 
@@ -180,7 +189,7 @@ the status topic).
 |---|---|---|
 | `cmd` | always | `on`, `off`, `flash_on`, `flash_off`, or `toggle` |
 | `priority` | always (defaults to 0) | Higher wins; ties go to whichever request is newer |
-| `ttl` | `on`/`off`/`toggle` only | Seconds until this claim expires (default: `DEFAULT_LEASE_TTL`) |
+| `ttl` | `on`/`off`/`toggle`, and `flash_off` | Seconds until this claim expires (default: `DEFAULT_LEASE_TTL`). For `flash_off` it counts from the end of the pulse and covers the `on` state the pulse leaves behind |
 | `duration` | `flash_on`/`flash_off` only | Seconds the hardware pulse runs for - required, no default |
 
 `toggle` flips whatever the channel's current resolved state is (or turns it on if nothing was
@@ -258,11 +267,11 @@ dropped) - they answer different questions, so they're deliberately not the same
   channel that refuses to be written keeps saying so in the module bitmask instead of being
   reported as whatever we wished for. A correction to a channel we believed was already applied
   is logged as a warning (rate-limited to one per 30 s per channel, so a jammed relay does not
-  bury the journal). The failure that motivated this: a `flash_off` pulse expires, the coil
-  closes itself, no lease remains - and a gateway that trusted its own bookkeeping would decide
-  "off is already applied" and leave the relay closed indefinitely, with both status topics
-  reporting `off`. The only honest witness was the on-time counter, which has always been fed the
-  polled state.
+  bury the journal). What this protects against is a coil that changed without the gateway asking
+  - a hand on the module, a glitch, a lost frame: previously the gateway would compare against its
+  own bookkeeping, conclude "already applied", and leave the divergence in place indefinitely with
+  both status topics reporting the state it *meant* to have. The on-time counters were the only
+  honest witness, since they have always been fed the polled state.
 - Every layer that can fail silently has a counter for it: TCP connects/disconnects, MQTT
   broker connects/disconnects, and service restarts - all retained on MQTT so a dashboard that
   subscribes late still sees the last known values immediately.

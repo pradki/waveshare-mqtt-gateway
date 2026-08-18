@@ -131,12 +131,26 @@ class MQTTGateway:
                 LOG.warning("%s od %s dla %s/%s bez 'duration', ignoruję", cmd, service, module_id, name)
                 return
             duration = float(duration)
-            lease = Lease(service=service, state=(cmd == "flash_on"), priority=priority,
-                          expires_at=now + duration, kind="flash", duration=duration)
+            if cmd == "flash_on":
+                # Po impulsie moduł sam rozwiera cewkę, czyli wraca do stanu domyślnego -
+                # nie ma czego posiadać, leasing kończy się razem z impulsem.
+                lease = Lease(service=service, state=True, priority=priority,
+                              expires_at=now + duration, kind="flash", duration=duration,
+                              flash_until=now + duration)
+            else:
+                # `flash_off` to impuls odwrotny: moduł rozwiera cewkę na `duration`, a potem
+                # sam ją zwiera. W tym jest cały sens tej komendy ("przerwij na chwilę pracę
+                # urządzenia"), więc stan po impulsie trzymamy jako zwykłe "on" - inaczej
+                # reconciler gasiłby to, co sprzęt właśnie celowo załączył. Trzymanie działa
+                # jak po komendzie `on`: przez `ttl`, do odnowienia.
+                ttl = float(payload.get("ttl", config.DEFAULT_LEASE_TTL))
+                lease = Lease(service=service, state=False, priority=priority,
+                              expires_at=now + duration + ttl, kind="flash", duration=duration,
+                              flash_until=now + duration, hold_after=True)
         else:  # toggle
             ttl = float(payload.get("ttl", config.DEFAULT_LEASE_TTL))
             current = table.resolve(channel, now)
-            new_state = not current.state if current else True
+            new_state = not current.level_state() if current else True
             lease = Lease(service=service, state=new_state, priority=priority,
                           expires_at=now + ttl, kind="level")
 

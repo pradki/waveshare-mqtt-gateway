@@ -1,0 +1,3 @@
+# Kod jedzie na Raspberry Pi (systemd), a edytowany bywa na Windows - wymuszamy LF
+# niezależnie od OS hosta, żeby nie było niespodzianek przy uruchomieniu.
+* text=auto eol=lf

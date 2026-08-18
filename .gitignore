@@ -1,0 +1,12 @@
+# Lokalna konfiguracja z prawdziwymi adresami IP z sieci lokalnej - szablon w config.example.py
+config.py
+
+# Stan runtime (liczniki on-time, licznik restartów usługi) - generowany przez usługę
+counters.json
+
+# Python
+__pycache__/
+*.py[cod]
+
+venv/
+.venv/

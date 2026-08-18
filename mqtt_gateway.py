@@ -66,9 +66,15 @@ class MQTTGateway:
     def _on_connect(self, client, userdata, flags, rc, properties=None):
         if rc == 0:
             self.cnt_mqtt_connects += 1
-            topic = f"{config.MQTT_TOPIC_ROOT}/+/+/cmd/+"
-            client.subscribe(topic)
-            LOG.info("Connected (#%d), subscribed to %s", self.cnt_mqtt_connects, topic)
+            # Subskrybujemy tylko moduły faktycznie skonfigurowane w tym procesie - nie
+            # szeroki wildcard "+/+/cmd/+" - żeby obce/przestarzałe moduły (np. retained
+            # komendy spod usuniętej/przemianowanej nazwy modułu) nigdy tu nie dotarły,
+            # zamiast dostawać je i dopiero potem odrzucać z ostrzeżeniem.
+            for module_id in self.channel_tables:
+                topic = f"{config.MQTT_TOPIC_ROOT}/{module_id}/+/cmd/+"
+                client.subscribe(topic)
+            LOG.info("Connected (#%d), subscribed to modules: %s",
+                     self.cnt_mqtt_connects, ", ".join(self.channel_tables) or "(none)")
         else:
             LOG.warning("Connect failed rc=%s", rc)
 

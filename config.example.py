@@ -57,8 +57,8 @@ def primary_names(module_cfg: dict) -> dict[int, str]:
 
 
 # === Logging / stan ===
-LOG_DIRECTORY = "/home/sqna/waveshare-mqtt-gateway/logs"
-COUNTERS_FILE = "/home/sqna/waveshare-mqtt-gateway/counters.json"
+LOG_DIRECTORY = "/home/sqna/cave/raspberry/waveshare-mqtt-gateway/logs"
+COUNTERS_FILE = "/home/sqna/cave/raspberry/waveshare-mqtt-gateway/counters.json"
 
 COUNTERS_AUTOSAVE_SECONDS = 30
 RECONCILE_TICK_SECONDS = 1.0

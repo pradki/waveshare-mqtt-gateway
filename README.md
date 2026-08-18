@@ -95,11 +95,15 @@ gateway (not raw serial). Channels are 1-indexed in every command/topic; interna
 
 ## Install
 
+Deployed on the Pi under the shared `cave` checkout, using the shared `cave` venv (already has
+`paho-mqtt`, but `pip install -r requirements.txt` is harmless if you're setting up fresh) -
+match whatever `waveshare-mqtt-gateway.service` actually says if you've changed the paths.
+
 ```bash
+cd /home/sqna/cave/raspberry
 git clone git@github.com:pradki/waveshare-mqtt-gateway.git
 cd waveshare-mqtt-gateway
-python3 -m venv /home/sqna/venv/waveshare-mqtt-gateway
-/home/sqna/venv/waveshare-mqtt-gateway/bin/pip install -r requirements.txt
+/home/sqna/venv/cave/bin/pip install -r requirements.txt
 cp config.example.py config.py   # then edit config.py, see below
 sudo cp waveshare-mqtt-gateway.service /etc/systemd/system/
 sudo systemctl daemon-reload
@@ -107,6 +111,27 @@ sudo systemctl enable --now waveshare-mqtt-gateway
 ```
 
 Requires Python 3.10+ (the code uses `X | Y` union type hints in dataclass fields).
+
+### Day-to-day: checking on it / picking up changes
+
+```bash
+# is it running, and what did it last log
+sudo systemctl status waveshare-mqtt-gateway
+journalctl -u waveshare-mqtt-gateway -f
+
+# pulled new code, or just changed config.py / the .service file
+cd /home/sqna/cave/raspberry/waveshare-mqtt-gateway
+git pull
+sudo cp waveshare-mqtt-gateway.service /etc/systemd/system/   # only if the unit file itself changed
+sudo systemctl daemon-reload                                  # only if the unit file itself changed
+sudo systemctl restart waveshare-mqtt-gateway
+
+# stop it entirely / remove from boot
+sudo systemctl disable --now waveshare-mqtt-gateway
+```
+
+`counters.json` and the restart counter persist across `restart` (and across reboots) - they
+live next to `config.py`, not inside the systemd unit, so none of the commands above touch them.
 
 ## Configuration
 

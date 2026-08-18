@@ -5,8 +5,8 @@ After=network.target
 [Service]
 Type=simple
 User=sqna
-WorkingDirectory=/home/sqna/waveshare-mqtt-gateway
-ExecStart=/home/sqna/venv/waveshare-mqtt-gateway/bin/python /home/sqna/waveshare-mqtt-gateway/main.py
+WorkingDirectory=/home/sqna/cave/raspberry/waveshare-mqtt-gateway
+ExecStart=/home/sqna/venv/cave/bin/python /home/sqna/cave/raspberry/waveshare-mqtt-gateway/main.py
 Restart=always
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1

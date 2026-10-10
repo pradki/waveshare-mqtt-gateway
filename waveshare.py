@@ -88,6 +88,15 @@ class Relay30CH:
         for b in data_bytes:
             for i in range(8):
                 states.append(bool(b & (1 << i)))
+        if len(states) < self.channel_count:
+            # Ramka doszła ucięta albo przesunięta (np. odpowiedź na poprzednie
+            # zapytanie dociągnięta z opóźnieniem przez tcpclient i zrośnięta z tą) -
+            # niesie mniej bitów niż kanałów. Rzucamy tu, nie niżej: wywołujący już ma
+            # na to except (read_all nieudane -> pomiń tick), bez tego kod próbujący
+            # zaindeksować states[ch-1] dla wysokich kanałów wywalał się IndexErrorem
+            # głębiej w reconcilerze, zamiast dać się złapać w jednym, właściwym miejscu.
+            raise ValueError(
+                f"Odpowiedź niesie {len(states)} bitów, oczekiwano {self.channel_count}: {resp!r}")
         return states[:self.channel_count]
 
     async def write_multiple(self, bits: list[bool]):

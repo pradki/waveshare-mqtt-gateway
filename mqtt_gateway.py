@@ -181,8 +181,21 @@ class MQTTGateway:
 
     def _run_loop(self):
         LOG.info("Connecting to MQTT %s:%s", self.host, self.port)
-        self.client.connect(self.host, self.port, keepalive=30)
         try:
+            # connect_async(), nie connect() - connect() próbuje się połączyć
+            # OD RAZU i rzuca wyjątkiem, gdy broker jeszcze nie przyjmuje
+            # połączeń (typowe zaraz po reboocie Pi, jeśli mosquitto wstaje
+            # choć chwilę wolniej niż ten gateway) - wyjątek nieobsłużony w
+            # tym wątku po cichu go zabija, bez żadnego śladu w systemd
+            # (proces główny i tak żyje dalej, tylko już nigdy się nie
+            # połączy - przekaźniki przestają reagować na komendy, mimo że
+            # `systemctl status` pokazuje "active (running)"). connect_async()
+            # odkłada pierwszą próbę do loop_forever(), które z
+            # retry_first_connection=True faktycznie ponawia - to właśnie ten
+            # retry miał obsłużyć ten przypadek, ale nigdy nie dostawał szansy
+            # (zaobserwowane naprawdę, po reboocie Pi - dokładnie ten bug
+            # sprawił, że komendy przekaźników z caveweb przestały działać).
+            self.client.connect_async(self.host, self.port, keepalive=30)
             self.client.loop_forever(retry_first_connection=True)
         except Exception:
             LOG.exception("MQTT loop error")
